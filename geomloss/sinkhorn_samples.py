@@ -115,13 +115,14 @@ def sinkhorn_tensorized(
             is computed as :math:`\text{blur}^p`.
             Defaults to 0.05.
 
-        reach (float or None (= +infty), optional): Typical scale for the
+        reach (float or None (= +infty) or tuple, optional): Typical scale for the
             maximum displacement between any two points :math:`x_i` and :math:`y_j`
             in the optimal transport model.
             In the unbalanced Sinkhorn divergence,
             the strength :math:`\rho` of the soft marginal constraints
-            is computed as :math:`\rho = \text{reach}^p`.
-            Defaults to None.
+            is computed as :math:`\rho = \text{reach}^p`. Type tuple in the 
+            asymmetric unbalanced OT case.
+            Defaults to None. 
 
         diameter (float or None, optional): Upper bound on the value
             of the distance :math:`\|x_i-y_j\|` between any two samples.

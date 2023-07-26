@@ -56,7 +56,12 @@ from .utils import scal
 
 def dampening(eps, rho):
     """Dampening factor for entropy+unbalanced OT with KL penalization of the marginals."""
-    return 1 if rho is None else 1 / (1 + eps / rho)
+    if rho is None:
+        return 1
+    elif rho==0:
+        return 0
+    else :
+        return (1 + eps / rho)
 
 
 def log_weights(a):
@@ -159,7 +164,11 @@ def scaling_parameters(x, y, p, blur, reach, diameter, scaling):
         diameter = max_diameter(x.view(-1, D), y.view(-1, D))
 
     eps = blur ** p
-    rho = None if reach is None else reach ** p
+    if type(reach)==tuple:
+        rho = (reach[0] ** p, reach[1] ** p)
+    else :
+        rho = None if reach is None else reach ** p
+
     eps_list = epsilon_schedule(p, diameter, blur, scaling)
     return diameter, eps, eps_list, rho
 
@@ -219,19 +228,42 @@ def sinkhorn_cost(
                 # See Proposition 12 (Dual formulas for the Sinkhorn costs)
                 # in "Sinkhorn divergences for unbalanced optimal transport",
                 # Sejourne et al., https://arxiv.org/abs/1910.12958.
-                return scal(
-                    a,
-                    UnbalancedWeight(eps, rho)(
-                        (-f_aa / rho).exp() - (-f_ba / rho).exp()
-                    ),
-                    batch=batch,
-                ) + scal(
-                    b,
-                    UnbalancedWeight(eps, rho)(
-                        (-g_bb / rho).exp() - (-g_ab / rho).exp()
-                    ),
-                    batch=batch,
-                )
+                if type(rho)==tuple :
+
+                    if rho[0]==0 and rho[1]!=0 :
+                        return scal(
+                            a,
+                            (-rho[1])/2 
+                            + (1/2)*UnbalancedWeight(eps, rho[1])((-f_aa / rho[1]).exp()),batch=batch) + scal(
+                            b, ((rho[1])/2)+UnbalancedWeight(eps, rho[1])((-g_bb / rho[1]).exp()/2 - (-g_ab / rho[1]).exp()),batch=batch)
+                    elif rho[1]==0 and rho[0]!=0 :
+                        return scal(
+                            a,
+                            (rho[0])/2 + UnbalancedWeight(eps, rho[0])( (-f_aa / rho[0]).exp()/2 - (-f_ba / rho[0]).exp())
+                            ,batch=batch) + scal(
+                            b, ((-rho[0])/2)+(1/2)*UnbalancedWeight(eps, rho[0])( (-g_bb / rho[0]).exp()),batch=batch)
+                    else :
+                        return scal(
+                            a,
+                            (rho[0]-rho[1])/2 + UnbalancedWeight(eps, rho[0])( (-f_aa / rho[0]).exp()/2 - (-f_ba / rho[0]).exp())
+                            + (1/2)*UnbalancedWeight(eps, rho[1])((-f_aa / rho[1]).exp()),batch=batch) + scal(
+                            b, ((rho[1]-rho[0])/2)+UnbalancedWeight(eps, rho[1])((-g_bb / rho[1]).exp()/2 - (-g_ab / rho[1]).exp())
+                            + (1/2)*UnbalancedWeight(eps, rho[0])( (-g_bb / rho[0]).exp()),batch=batch)
+    
+                else :
+                    return scal(
+                        a,
+                        UnbalancedWeight(eps, rho)(
+                            (-f_aa / rho).exp() - (-f_ba / rho).exp()
+                        ),
+                        batch=batch,
+                    ) + scal(
+                        b,
+                        UnbalancedWeight(eps, rho)(
+                            (-g_bb / rho).exp() - (-g_ab / rho).exp()
+                        ),
+                        batch=batch,
+                    )
 
         else:  # Classic, BIASED entropized Optimal Transport OT_eps(a,b)
             if rho is None:  # Balanced case:
@@ -244,12 +276,18 @@ def sinkhorn_cost(
                 # Sejourne et al., https://arxiv.org/abs/1910.12958.
                 # N.B.: Even if this quantity is never used in practice,
                 #       we may want to re-check this computation...
-                return scal(
-                    a, UnbalancedWeight(eps, rho)(1 - (-f_ba / rho).exp()), batch=batch
-                ) + scal(
-                    b, UnbalancedWeight(eps, rho)(1 - (-g_ab / rho).exp()), batch=batch
-                )
-
+                if type(rho)==tuple:
+                    return scal(
+                        a, UnbalancedWeight(eps, rho[0])(1 - (-f_ba / rho[0]).exp()), batch=batch
+                    ) + scal(
+                        b, UnbalancedWeight(eps, rho[1])(1 - (-g_ab / rho[1]).exp()), batch=batch
+                    )
+                else :
+                    return scal(
+                        a, UnbalancedWeight(eps, rho)(1 - (-f_ba / rho).exp()), batch=batch
+                    ) + scal(
+                        b, UnbalancedWeight(eps, rho)(1 - (-g_ab / rho).exp()), batch=batch
+                    )
 
 # ==============================================================================
 #                              Sinkhorn loop
@@ -444,7 +482,10 @@ def sinkhorn_loop(
     # < 1 for unbalanced OT with KL penalty on the marginal constraints.
     # For reference, see Table 1 in "Sinkhorn divergences for unbalanced
     # optimal transport", Sejourne et al., https://arxiv.org/abs/1910.12958.
-    damping = dampening(eps, rho)
+    if type(rho)==tuple:
+        damping = (dampening(eps, rho[0]), dampening(eps, rho[1]))
+    else :
+        damping = dampening(eps, rho)
 
     # Load the measures and cost matrices at the current scale:
     a_log, b_log = a_logs[k], b_logs[k]
@@ -459,35 +500,63 @@ def sinkhorn_loop(
     #       a convolution with the cost function (i.e. the limit for eps=+infty).
     #       The algorithm was originally written with this convolution
     #       - but in this implementation, we use "softmin" for the sake of simplicity.
-    g_ab = damping * softmin(eps, C_yx, a_log)  # a -> b
-    f_ba = damping * softmin(eps, C_xy, b_log)  # b -> a
-    if debias:
-        f_aa = damping * softmin(eps, C_xx, a_log)  # a -> a
-        g_bb = damping * softmin(eps, C_yy, b_log)  # a -> a
+    if type(rho)==tuple:
+        g_ab = damping[1]*softmin(eps, C_yx, a_log)
+        f_ba = damping[0] * softmin(eps, C_xy, b_log)
+        if debias:
+            f_aa = damping[0] * softmin(eps, C_xx, a_log)  # a -> a
+            g_bb = damping[1] * softmin(eps, C_yy, b_log)  # a -> a
+    else :
+        g_ab = damping * softmin(eps, C_yx, a_log)  # a -> b
+        f_ba = damping * softmin(eps, C_xy, b_log)  # b -> a
+        if debias:
+            f_aa = damping * softmin(eps, C_xx, a_log)  # a -> a
+            g_bb = damping * softmin(eps, C_yy, b_log)  # a -> a
 
     # Lines 4-5: eps-scaling descent ---------------------------------------------------
     for i, eps in enumerate(eps_list):  # See Fig. 3.25-26 in Jean Feydy's PhD thesis.
 
         # Line 6: update the damping coefficient ---------------------------------------
-        damping = dampening(eps, rho)  # eps and damping change across iterations
+        if type(rho)==tuple:
+            damping = (dampening(eps, rho[0]), dampening(eps, rho[1]))
 
-        # Line 7: "coordinate ascent" on the dual problems -----------------------------
-        # N.B.: As discussed in Section 3.3.3 of Jean Feydy's PhD thesis,
-        #       we perform "symmetric" instead of "alternate" updates
-        #       of the dual potentials "f" and "g".
-        #       To this end, we first create buffers "ft", "gt"
-        #       (for "f-tilde", "g-tilde") using the standard
-        #       Sinkhorn formulas, and update both dual vectors
-        #       simultaneously.
-        ft_ba = damping * softmin(eps, C_xy, b_log + g_ab / eps)  # b -> a
-        gt_ab = damping * softmin(eps, C_yx, a_log + f_ba / eps)  # a -> b
+            # Line 7: "coordinate ascent" on the dual problems -----------------------------
+            # N.B.: As discussed in Section 3.3.3 of Jean Feydy's PhD thesis,
+            #       we perform "symmetric" instead of "alternate" updates
+            #       of the dual potentials "f" and "g".
+            #       To this end, we first create buffers "ft", "gt"
+            #       (for "f-tilde", "g-tilde") using the standard
+            #       Sinkhorn formulas, and update both dual vectors
+            #       simultaneously.
+            ft_ba = damping[0] * softmin(eps, C_xy, b_log + g_ab / eps)  # b -> a
+            gt_ab = damping[1] * softmin(eps, C_yx, a_log + f_ba / eps)  # a -> b
 
-        # See Fig. 3.21 in Jean Feydy's PhD thesis to see the importance
-        # of debiasing when the target "blur" or "eps**(1/p)" value is larger
-        # than the average distance between samples x_i, y_j and their neighbours.
-        if debias:
-            ft_aa = damping * softmin(eps, C_xx, a_log + f_aa / eps)  # a -> a
-            gt_bb = damping * softmin(eps, C_yy, b_log + g_bb / eps)  # b -> b
+            # See Fig. 3.21 in Jean Feydy's PhD thesis to see the importance
+            # of debiasing when the target "blur" or "eps**(1/p)" value is larger
+            # than the average distance between samples x_i, y_j and their neighbours.
+            if debias:
+                ft_aa = damping[0] * softmin(eps, C_xx, a_log + f_aa / eps)  # a -> a
+                gt_bb = damping[1] * softmin(eps, C_yy, b_log + g_bb / eps)  # b -> b
+        else:
+            damping = dampening(eps, rho)  # eps and damping change across iterations
+
+            # Line 7: "coordinate ascent" on the dual problems -----------------------------
+            # N.B.: As discussed in Section 3.3.3 of Jean Feydy's PhD thesis,
+            #       we perform "symmetric" instead of "alternate" updates
+            #       of the dual potentials "f" and "g".
+            #       To this end, we first create buffers "ft", "gt"
+            #       (for "f-tilde", "g-tilde") using the standard
+            #       Sinkhorn formulas, and update both dual vectors
+            #       simultaneously.
+            ft_ba = damping * softmin(eps, C_xy, b_log + g_ab / eps)  # b -> a
+            gt_ab = damping * softmin(eps, C_yx, a_log + f_ba / eps)  # a -> b
+
+            # See Fig. 3.21 in Jean Feydy's PhD thesis to see the importance
+            # of debiasing when the target "blur" or "eps**(1/p)" value is larger
+            # than the average distance between samples x_i, y_j and their neighbours.
+            if debias:
+                ft_aa = damping * softmin(eps, C_xx, a_log + f_aa / eps)  # a -> a
+                gt_bb = damping * softmin(eps, C_yy, b_log + g_bb / eps)  # b -> b
 
         # Symmetrized updates - see Fig. 3.24.b in Jean Feydy's PhD thesis:
         f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)  # OT(a,b) wrt. a, b
@@ -592,15 +661,26 @@ def sinkhorn_loop(
             # On images and volumes, we simply rely on (bi/tri-)linear interpolation.
             #
             # N.B.: the cross-updates below *must* be done in parallel!
-            f_ba, g_ab = (
-                extrapolate(f_ba, g_ab, eps, damping, C_xy, b_log, C_xy_fine),
-                extrapolate(g_ab, f_ba, eps, damping, C_yx, a_log, C_yx_fine),
-            )
+            if type(rho)==tuple :
+                f_ba, g_ab = (
+                    extrapolate(f_ba, g_ab, eps, damping[0], C_xy, b_log, C_xy_fine),
+                    extrapolate(g_ab, f_ba, eps, damping[1], C_yx, a_log, C_yx_fine),
+                )
 
-            # Extrapolation for the symmetric problems:
-            if debias:
-                f_aa = extrapolate(f_aa, f_aa, eps, damping, C_xx, a_log, C_xx_fine)
-                g_bb = extrapolate(g_bb, g_bb, eps, damping, C_yy, b_log, C_yy_fine)
+                # Extrapolation for the symmetric problems:
+                if debias:
+                    f_aa = extrapolate(f_aa, f_aa, eps, damping[0], C_xx, a_log, C_xx_fine)
+                    g_bb = extrapolate(g_bb, g_bb, eps, damping[1], C_yy, b_log, C_yy_fine)
+            else : 
+                f_ba, g_ab = (
+                    extrapolate(f_ba, g_ab, eps, damping, C_xy, b_log, C_xy_fine),
+                    extrapolate(g_ab, f_ba, eps, damping, C_yx, a_log, C_yx_fine),
+                )
+
+                # Extrapolation for the symmetric problems:
+                if debias:
+                    f_aa = extrapolate(f_aa, f_aa, eps, damping, C_xx, a_log, C_xx_fine)
+                    g_bb = extrapolate(g_bb, g_bb, eps, damping, C_yy, b_log, C_yy_fine)
 
             # Line 13: update the measure weights and cost "matrices" ------------------
             k = k + 1
@@ -617,14 +697,24 @@ def sinkhorn_loop(
 
     if last_extrapolation:
         # The cross-updates should be done in parallel!
-        f_ba, g_ab = (
-            damping * softmin(eps, C_xy, (b_log + g_ab / eps).detach()),
-            damping * softmin(eps, C_yx, (a_log + f_ba / eps).detach()),
-        )
+        if type(rho)==tuple:
+            f_ba, g_ab = (
+                damping[0] * softmin(eps, C_xy, (b_log + g_ab / eps).detach()),
+                damping[1] * softmin(eps, C_yx, (a_log + f_ba / eps).detach()),
+            )
 
-        if debias:
-            f_aa = damping * softmin(eps, C_xx, (a_log + f_aa / eps).detach())
-            g_bb = damping * softmin(eps, C_yy, (b_log + g_bb / eps).detach())
+            if debias:
+                f_aa = damping[0] * softmin(eps, C_xx, (a_log + f_aa / eps).detach())
+                g_bb = damping[1] * softmin(eps, C_yy, (b_log + g_bb / eps).detach())
+        else:
+            f_ba, g_ab = (
+                damping * softmin(eps, C_xy, (b_log + g_ab / eps).detach()),
+                damping * softmin(eps, C_yx, (a_log + f_ba / eps).detach()),
+            )
+
+            if debias:
+                f_aa = damping * softmin(eps, C_xx, (a_log + f_aa / eps).detach())
+                g_bb = damping * softmin(eps, C_yy, (b_log + g_bb / eps).detach())
 
     if debias:
         return f_aa, g_bb, g_ab, f_ba
